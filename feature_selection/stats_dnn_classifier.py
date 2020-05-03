@@ -29,17 +29,19 @@ def prepare_input(file_num_limit):
     # sampled_para_encoded_dir = './encoded_para_sep/'  # encoded_para_sep_sampled
     sampled_para_txt_list = './labels_feature_stats_merged_cleaned20200223.csv'  # plain_txt_name_index_sampled.csv
 
+    # text stats: 13 structure: 10 writing style: 20 readability: 7 edit history: 15
+
     # para_encoded_txts = os.listdir(sampled_para_encoded_dir)
     sampled_label_data = pd.read_csv(sampled_para_txt_list, encoding='utf-8-sig')
     onehotlabels = sampled_label_data.iloc[:file_num_limit,2:8].values
-    stats_features = sampled_label_data.iloc[:file_num_limit,10:].values
+    stats_features = sampled_label_data.iloc[:file_num_limit,10:50].values
 
     return onehotlabels, stats_features
 
 
 def DNN_stats(X_train_stats, y_train, X_val_stats, y_val, learning_rate, adam_decay, batch_size, epochs):
     # stats part
-    stats_input = Input(shape=(65,), name='stats_input')
+    stats_input = Input(shape=(X_train_stats.shape[1],), name='stats_input')
     x = Dense(128, activation='relu', name='merged_feedforward_1')(stats_input)
     x = Dense(64, activation='relu', name='merged_feedforward_2')(x)
     possibility_outputs = Dense(1, activation='sigmoid', name='label_output', kernel_regularizer=regularizers.l2(0.01))(x)  # softmax  sigmoid
@@ -77,7 +79,7 @@ if __name__ == '__main__':
     # 换算成二分类
     # no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
     flaw_evaluation = []
-    for flaw_index in range(5, 6):
+    for flaw_index in range(6):
         no_good_flaw_type = flaw_index # finished
         # 找出FA类的索引
         FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]

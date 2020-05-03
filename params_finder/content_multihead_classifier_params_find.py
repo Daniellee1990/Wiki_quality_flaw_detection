@@ -9,22 +9,28 @@ import nltk.data
 import numpy as np
 import tensorflow
 import keras
-from keras import regularizers, optimizers
+from keras import regularizers
 from keras import backend as K
 from keras.callbacks import TensorBoard
 from keras.engine.topology import Layer
 from keras.models import Model, Sequential
-from keras.layers import Input, Dense, LSTM, Bidirectional, Flatten, Dropout, Multiply, Add, Permute, concatenate
+from keras.layers import Input, Dense, LSTM, Bidirectional, Flatten, Dropout, Multiply, Permute, concatenate
 from keras.utils import np_utils
+from keras.optimizers import Adam
 from sklearn import preprocessing
 from sklearn.model_selection import train_test_split, StratifiedKFold
-# from keras_layer_normalization import LayerNormalization
 
 from keras.callbacks import ReduceLROnPlateau
 import matplotlib.pyplot as plt
 
+import skopt
+from skopt import gbrt_minimize, gp_minimize
+from skopt.utils import use_named_args
+from skopt.space import Real, Categorical, Integer
+
 from evaluation_metrics import  precision, recall, fbeta_score, fmeasure, getAccuracy
 
+# sys.stdout = io.TextIOWrapper(sys.stdout.buffer,encoding='utf-8')  #解决print输出报编码错问题
 
 def prepare_input(file_num_limit, paras_limit):
     sampled_para_encoded_dir = './encoded_para_sep/'  # encoded_para_sep_sampled
@@ -69,6 +75,69 @@ def prepare_input(file_num_limit, paras_limit):
     return contents, onehotlabels, stats_features
 
 
+# target params
+dim_learning_rate = Real(low=1e-4, high=1e-2, prior='log-uniform',
+                     name='learning_rate')
+dim_hidden_head = Integer(low=16, high=64, name='hidden_head')
+dim_multiheads = Integer(low=16, high=64, name='multiheads')
+dim_epochs = Integer(low=10, high=30, name='epochs')
+dim_batch_size = Integer(low=16, high=256, name='batch_size')
+dim_adam_decay = Real(low=1e-6,high=1e-2, name="adam_decay")
+
+dimensions = [dim_learning_rate,
+              dim_hidden_head,
+              dim_multiheads,
+              dim_epochs,
+              dim_batch_size,
+              dim_adam_decay
+             ]
+default_parameters = [1e-4, 32, 32, 20, 100, 1e-6]
+
+# input prepare
+# 输入限制，文章数量及每篇文章输入的句子/段落数
+file_num_limit = 45614  # total 45614
+paras_limit = 20
+
+encoded_contents, onehotlabels, stats_features = prepare_input(file_num_limit, paras_limit)
+
+# stats_features 标准化
+scaler = preprocessing.StandardScaler() #实例化
+scaler = scaler.fit(stats_features)
+stats_features = scaler.transform(stats_features)
+
+# 换算成二分类
+# no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
+no_good_flaw_type = 4 # finished
+# 找出FA类的索引
+FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]
+# 找出二分类另外一类的索引
+not_good_indexs = [index for index in range(len(onehotlabels)) if onehotlabels[index][no_good_flaw_type] > 0]
+binary_classification_indexs = FA_indexs + not_good_indexs
+print('FA count:', len(FA_indexs), 'no good count:', len(not_good_indexs))
+encoded_contents = np.array([encoded_contents[index,:,:] for index in binary_classification_indexs])
+onehotlabels = np.array([onehotlabels[index] for index in binary_classification_indexs])
+stats_features = np.array([stats_features[index] for index in binary_classification_indexs])
+
+# 变成二分类的标签
+onehotlabels = onehotlabels[:,no_good_flaw_type]
+onehotlabels = np.array([[label] for label in onehotlabels])
+### split data into training set and label set
+# X_train, X_test, y_train, y_test = train_test_split(encoded_contents, onehotlabels, test_size=0.1, random_state=42)
+X_train_content, X_train_stats, y_train = encoded_contents, stats_features, onehotlabels
+
+# 打乱操作
+index = [i for i in range(len(y_train))]
+np.random.shuffle(index)
+
+X_train_content = encoded_contents[index]
+X_train_stats = stats_features[index]
+y_train = onehotlabels[index]
+
+X_train = [X_train_content, X_train_stats]
+y_train = y_train
+
+
+# model
 class Position_Embedding(Layer):
     
     def __init__(self,method='sum',embedding_dim=None,**kwargs):
@@ -259,13 +328,11 @@ def binary_crossentropy_add_mi(y_true, y_pred):
     return K.mean(K.binary_crossentropy(y_true, y_pred), axis=-1) + 1e-9
 
 
-def Multi_Head_Attention_sematic(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, hidden_head, multiheads, batch_size, epochs):
+def Multi_Head_Attention_sematic(X_train_content, y_train, learning_rate, hidden_head, multiheads, adam_decay):
     # content part
-    multiheads = multiheads
-    head_dim = hidden_head
     content_input = Input(shape=(X_train_content.shape[1],X_train_content.shape[2]), name='content_bert_input')
     embedding = Position_Embedding()(content_input)
-    attention = Attention(multiheads=multiheads,head_dim=head_dim,mask_right=False)([embedding,embedding,embedding])
+    attention = Attention(multiheads=multiheads,head_dim=hidden_head,mask_right=False)([embedding,embedding,embedding])
     # attention_layer_norm = LayerNormalization()(attention)
     # 添加attention层
     x = Flatten()(attention)
@@ -273,121 +340,112 @@ def Multi_Head_Attention_sematic(X_train_content, X_train_stats, y_train, X_val_
     content_feedforward_2 = Dense(128, activation='relu', name='main_feedforward_2')(content_feedforward_1)
     content_feedforward_3 = Dense(64, activation='relu', name='main_feedforward_3')(content_feedforward_2)
     
-    # 
     possibility_outputs = Dense(1, activation='sigmoid', name='label_output')(content_feedforward_3)  # softmax  sigmoid
     
-    adam = optimizers.Adam(lr=learning_rate, decay=adam_decay)  # , clipnorm=0.5
+    adam = Adam(lr=learning_rate, decay= adam_decay)  # , clipnorm=0.5
     model = Model(inputs=content_input, outputs=possibility_outputs)  # stats_input
     model.compile(loss=binary_crossentropy_add_mi, optimizer=adam, metrics=['accuracy', precision, recall, fmeasure])  # categorical_crossentropy  binary_crossentropy
     # print(model.summary())
 
-    history = model.fit(X_train_content, y_train, batch_size, epochs, validation_data=(X_val_content, y_val), shuffle=True, callbacks=[TensorBoard(log_dir='./tmp/log')])
-
-    return model, history
-
-def draw_graph(graph_type):
-    # 绘制训练 & 验证的准确率值
-    plt.plot(history.history[graph_type])
-    plt.plot(history.history['val_' + graph_type])
-    plt.title('Model ' + graph_type)
-    plt.ylabel(graph_type)
-    plt.xlabel('Epoch')
-    plt.legend(['Train', 'Test'], loc='upper left')
-    plt.show()
+    return model
 
 
-if __name__ == '__main__':
-    # 输入限制，文章数量及每篇文章输入的句子/段落数
-    file_num_limit = 45614  # total 45614
-    paras_limit=20
+def Multi_Head_Attention_sematic_stats(X_train, y_train, learning_rate, hidden_head, multiheads, adam_decay):
+    # content part
+    X_train_content = X_train[0]
+    X_train_stats = X_train[1]
+    content_input = Input(shape=(X_train_content.shape[1],X_train_content.shape[2]), name='content_bert_input')
+    embedding = Position_Embedding()(content_input)
+    attention = Attention(multiheads=multiheads,head_dim=hidden_head,mask_right=False)([embedding,embedding,embedding])
+    # attention_layer_norm = LayerNormalization()(attention)
+    # 添加attention层
+    x = Flatten()(attention)
+    content_feedforward_1 = Dense(256, activation='relu', name='main_feedforward_1')(x)
+    content_feedforward_2 = Dense(128, activation='relu', name='main_feedforward_2')(content_feedforward_1)
+    content_feedforward_3 = Dense(64, activation='relu', name='main_feedforward_3')(content_feedforward_2)
 
-    # params get through skopt
-    params = [[0.0001593086513635023, 50, 31, 18, 33, 0.0013014908267888882],
-        [0.0001, 32, 32, 20, 100, 1e-06],
-        [0.00027865731085418373, 49, 64, 20, 16, 0.007329958437585871],
-        [0.00019243183636601807, 22, 48, 14, 224, 0.0014532505180786372],
-        [0.00039653231480439864, 34, 55, 20, 125, 0.001714923735358048],
-        [0.0001396617345976405, 31, 46, 28, 144, 0.0012061006304266593]]
-
-    encoded_contents, onehotlabels, stats_features = prepare_input(file_num_limit, paras_limit)
-
-    # stats_features 标准化
-    scaler = preprocessing.StandardScaler() #实例化
-    scaler = scaler.fit(stats_features)
-    stats_features = scaler.transform(stats_features)
+    # stats part
+    stats_input = Input(shape=(65,), name='stats_input')
+    concat_layer = concatenate([content_feedforward_3, stats_input])
+    x = Dense(128, activation='relu', name='merged_feedforward_1')(concat_layer)
+    x = Dense(64, activation='relu', name='merged_feedforward_2')(x)
     
-    # 换算成二分类
-    # no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
-    flaw_evaluation = []
-    for flaw_index in range(6):
-        no_good_flaw_type = flaw_index # finished
-        # 找出FA类的索引
-        FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]
-        # 找出二分类另外一类的索引
-        not_good_indexs = [index for index in range(len(onehotlabels)) if onehotlabels[index][no_good_flaw_type] > 0]
-        binary_classification_indexs = FA_indexs + not_good_indexs
-        print('FA count:', len(FA_indexs), 'no good count:', len(not_good_indexs))
-        X_contents = np.array([encoded_contents[index,:,:] for index in binary_classification_indexs])
-        y_train = np.array([onehotlabels[index] for index in binary_classification_indexs])
-        X_stats = np.array([stats_features[index] for index in binary_classification_indexs])
-        
-        # 变成二分类的标签
-        y_train = y_train[:,no_good_flaw_type]
-        y_train = np.array([[label] for label in y_train])
-        ### split data into training set and label set
-        # X_train, X_test, y_train, y_test = train_test_split(encoded_contents, onehotlabels, test_size=0.1, random_state=42)
-        ### params set choose
-        target_param = params[no_good_flaw_type]
-
-        learning_rate = target_param[0]
-        hidden_head = target_param[1]
-        multiheads = target_param[2]
-        epochs = target_param[3]
-        batch_size = target_param[4]
-        adam_decay = target_param[5]
-        ### create the deep learning models
-        # 训练模型
-        X_train_content, X_train_stats, y_train = X_contents, X_stats, y_train
-
-        # 引入十折交叉验证
-        kfold = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
-        kfold_precision, kfold_recall, kfold_f1_score, kfold_acc, kfold_TNR = [], [], [], [], []
-        fold_counter = 0
-        for train, test in kfold.split(X_train_content, y_train):
-            print('folder comes to:', fold_counter)
-            _precision, _recall, _f1_score, _acc, _TNR = 0, 0, 0, 0, 0
-            X_test_content_kfold, X_test_stats_kfold, y_test_kfold = X_train_content[test], X_train_stats[test], y_train[test]
-            X_val_content_kfold, X_val_stats_kfold, y_val_kfold = X_train_content[train[-1000:]], X_train_stats[train[-1000:]], y_train[train[-1000:]]
-            X_train_content_kfold, X_train_stats_kfold, y_train_kfold = X_train_content[train[:-1000]], X_train_stats[train[:-1000]], y_train[train[:-1000]]
-
-            # 采用后1000条做验证集
-            # X_val, y_val = X_train[-1000:], y_train[-1000:]
-            # X_train, y_train = X_train[:-1000], y_train[:-1000]
-            model, history = Multi_Head_Attention_sematic(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
-                                                                X_val_content_kfold, X_val_stats_kfold, y_val_kfold, 
-                                                                learning_rate, adam_decay, hidden_head, multiheads, batch_size, epochs)
-            prediction = model.predict(X_test_content_kfold)  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
-            _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
-            print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)
-            kfold_precision.append(_precision)
-            kfold_recall.append(_recall)
-            kfold_f1_score.append(_f1_score)
-            kfold_acc.append(_acc)
-            kfold_TNR.append(_TNR)
-            fold_counter += 1
-            # Delete the Keras model with these hyper-parameters from memory.
-            del model
+    possibility_outputs = Dense(1, activation='sigmoid', name='label_output')(x)  # softmax  sigmoid
     
-            # Clear the Keras session, otherwise it will keep adding new
-            # models to the same TensorFlow graph each time we create
-            # a model with a different set of hyper-parameters.
-            K.clear_session()
-            tensorflow.reset_default_graph()
-        print('10 k average evaluation is:', 'precision:', np.mean(kfold_precision), 'recall', np.mean(kfold_recall), 'f1_score', np.mean(kfold_f1_score), 'accuracy', np.mean(kfold_acc), 'TNR', np.mean(kfold_TNR))
+    adam = Adam(lr=learning_rate, decay= adam_decay)  # , clipnorm=0.5
+    model = Model(inputs=[content_input, stats_input], outputs=[possibility_outputs])  # stats_input
+    model.compile(loss=binary_crossentropy_add_mi, optimizer=adam, metrics=['accuracy', precision, recall, fmeasure])  # categorical_crossentropy  binary_crossentropy
+    # print(model.summary())
 
-        evaluation_value = str(no_good_flaw_type) + ' 10 k average evaluation is: ' + ' precision: ' + str(np.mean(kfold_precision)) + ' recall ' + str(np.mean(kfold_recall)) + ' f1_score ' + str(np.mean(kfold_f1_score)) + ' accuracy ' + str(np.mean(kfold_acc)) + ' TNR ' + str(np.mean(kfold_TNR))
-        flaw_evaluation.append(evaluation_value)
+    return model
 
-    for item in flaw_evaluation:
-        print(item)
+# skopt
+@use_named_args(dimensions=dimensions)
+def fitness(learning_rate, hidden_head, multiheads,
+            epochs, batch_size, adam_decay):
 
+    model = Multi_Head_Attention_sematic_stats(
+                         X_train=X_train,
+                         y_train=y_train,
+                         learning_rate=learning_rate,
+                         hidden_head=hidden_head,
+                         multiheads=multiheads,
+                         adam_decay=adam_decay
+                        )
+    #named blackbox becuase it represents the structure
+    blackbox = model.fit(x=X_train,
+                        y=y_train,
+                        epochs=epochs,
+                        batch_size=batch_size,
+                        validation_split=0.15,
+                        shuffle=True,
+                        )  # X_train, [y_train]
+    #return the validation accuracy for the last epoch.
+    accuracy = blackbox.history['val_acc'][-1]
+
+    # Print the classification accuracy.
+    print()
+    print("Accuracy: {0:.3%}".format(accuracy))
+    print()
+
+
+    # Delete the Keras model with these hyper-parameters from memory.
+    del model
+    
+    # Clear the Keras session, otherwise it will keep adding new
+    # models to the same TensorFlow graph each time we create
+    # a model with a different set of hyper-parameters.
+    K.clear_session()
+    tensorflow.reset_default_graph()
+    
+    return -accuracy
+
+
+K.clear_session()
+tensorflow.reset_default_graph()
+gp_result = gp_minimize(func=fitness,
+                    dimensions=dimensions,
+                    n_calls=12,
+                    noise= 0.01,
+                    n_jobs=-1,
+                    kappa = 5,
+                    x0=default_parameters)
+
+print("best accuracy was " + str(round(gp_result.fun *-100,2))+"%.")
+print(gp_result.x)
+print(gp_result.func_vals)
+
+
+"""
+# no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
+# dim_learning_rate, dim_hidden_rnn, dropout_rate, dim_epochs, dim_batch_size, dim_adam_decay
+content-bilstm
+params = [
+        [],
+        []，
+        [],
+        [],
+        [],
+        []
+        ]
+"""

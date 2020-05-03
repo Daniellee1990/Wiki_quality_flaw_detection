@@ -8,7 +8,6 @@ import keras
 from sklearn import svm 
 from sklearn import tree
 from sklearn import metrics
-import xgboost as xgb
 from keras import regularizers
 from keras import backend as K
 from keras.callbacks import TensorBoard
@@ -18,6 +17,7 @@ from keras.layers import Input, Dense, LSTM, Bidirectional, Flatten, Dropout, Mu
 from keras.utils import np_utils
 from sklearn import preprocessing
 from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.metrics import roc_curve, auc
 
 from keras.callbacks import ReduceLROnPlateau
 import matplotlib.pyplot as plt
@@ -83,7 +83,9 @@ def getAccuracy(prediction, y_test): ### prediction and y_test are both encoded.
     precision = float(true_positive) / (float(true_positive) + float(false_positive))
     recall = float(true_positive) / (float(true_positive) + float(false_negative))
     f1_score = (2 * precision * recall) / (precision + recall)
-    return precision, recall, f1_score
+    acc = (true_positive + true_negative) / (true_positive + false_positive + false_negative + true_negative)
+    TNR = float(true_negative) / (float(false_positive) + float(true_negative))
+    return precision, recall, f1_score, acc, TNR
 
 
 if __name__ == '__main__':
@@ -100,7 +102,7 @@ if __name__ == '__main__':
     
     # 换算成二分类
     # no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
-    no_good_flaw_type = 5 # finished
+    no_good_flaw_type = 3 # finished
     # 找出FA类的索引
     FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index, :]]) == 0]
     # 找出二分类另外一类的索引
@@ -123,34 +125,35 @@ if __name__ == '__main__':
 
     # 引入十折交叉验证
     kfold = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
-    kfold_accuracy, kfold_recall, kfold_f1_score = [], [], []
+    kfold_precision, kfold_recall, kfold_f1_score, kfold_acc, kfold_TNR = [], [], [], [], []
     fold_counter = 0
     for train, test in kfold.split(X_train_stats, y_train):
         print('folder comes to:', fold_counter)
         X_test_stats_kfold, y_test_kfold = X_train_stats[test], y_train[test]
         X_train_stats_kfold, y_train_kfold = X_train_stats[train], y_train[train]
-
-        ### Decision Tree ###
-        # clf = tree.DecisionTreeClassifier()
-        # clf.fit(X_train_stats_kfold, y_train_kfold)
         ### SVM ###
         # kernel:‘linear’, ‘poly’, ‘rbf’, ‘sigmoid’, ‘precomputed’
-        """
-        clf = svm.SVC(C=1, cache_size=200, class_weight='balanced', coef0=0.0,
-                  decision_function_shape='ovr', degree=3, gamma=0.01, kernel='rbf',
-                  max_iter=-1, probability=True, random_state=None, shrinking=True,
-                  tol=0.001, verbose=False)
+        clf = svm.SVC(C=10, gamma=0.01, kernel='rbf', probability=True)
         clf.fit(X_train_stats_kfold, y_train_kfold)
-        """
-        # prediction = clf.predict(X_test_stats_kfold)
-        # _precision, _recall, _f1_score = getAccuracy(prediction, y_test_kfold)
-        ### xgboost ###
-        _precision, _recall, _f1_score = xgboost_model(X_train_stats_kfold, y_train_kfold, X_test_stats_kfold, y_test_kfold)
-        print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score)
-        kfold_accuracy.append(_precision)
+        prediction = clf.predict(X_test_stats_kfold)
+        prob = clf.predict_proba(X_test_stats_kfold)
+        prob = prob[:,1]
+        print(prob, prediction)
+        fpr, tpr, thresholds = roc_curve(y_test_kfold, prob)
+        print(type(fpr))
+        roc_auc = auc(fpr, tpr)  #auc为Roc曲线下的面积
+        fpr = fpr.tolist()
+        tpr = tpr.tolist()
+        print('FPR, TPR: ', fpr, '\n', tpr)
+        print('auc:', roc_auc)
+        _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
+        print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)
+        kfold_precision.append(_precision)
         kfold_recall.append(_recall)
         kfold_f1_score.append(_f1_score)
+        kfold_acc.append(_acc)
+        kfold_TNR.append(_TNR)
         fold_counter += 1
-    print('10 k average evaluation is:', 'precision:', np.mean(kfold_accuracy), 'recall', np.mean(kfold_recall), 'f1_score', np.mean(kfold_f1_score))
+    print('10 k average evaluation is:', 'precision:', np.mean(kfold_precision), 'recall', np.mean(kfold_recall), 'f1_score', np.mean(kfold_f1_score), 'accuracy', np.mean(kfold_acc), 'TNR', np.mean(kfold_TNR))
 
 

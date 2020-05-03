@@ -14,7 +14,7 @@ from keras import backend as K
 from keras.callbacks import TensorBoard
 from keras.engine.topology import Layer
 from keras.models import Model, Sequential
-from keras.layers import Input, Dense, SimpleRNN, GRU, LSTM, Bidirectional, Flatten, Dropout, Multiply, Add, Permute, concatenate
+from keras.layers import Input, Dense, GRU, Bidirectional, Flatten, Dropout, Multiply, Permute, concatenate
 from keras.utils import np_utils
 from keras.optimizers import Adam
 from sklearn import preprocessing
@@ -70,37 +70,30 @@ def prepare_input(file_num_limit, paras_limit):
     return contents, onehotlabels, stats_features
 
 
-def Bidirectional_LSTM_sematic_stats(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, dropout_rate, batch_size, epochs):
-    # content part
-    hidden_lstm_dim = 64
-    content_input = Input(shape=(X_train_content.shape[1],X_train_content.shape[2]), name='content_bert_input')
-    x = Bidirectional(LSTM(hidden_lstm_dim, return_sequences=True))(content_input)
+def Bidirectional_GRU_sematic(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, dropout_rate, batch_size, epochs):
+    # 不同于前一个模型，采用和融合模型一样架构的网络，此模型专注于调优至最佳表现效果
+    X_train = X_train_content
+    X_val = X_val_content
+    hidden_gru_dim = 64
+    content_input = Input(shape=(X_train.shape[1],X_train.shape[2]), name='bert_sent_encoded_input')
+    x = Bidirectional(GRU(hidden_gru_dim, return_sequences=True))(content_input)
     x = Dropout(dropout_rate)(x)
     # 添加attention层
     x = Flatten()(x)
-    attention_probs = Dense(2 * hidden_lstm_dim * X_train_content.shape[1], activation='softmax', name='attention_vec')(x)  # 200*2 * X_train_content.shape[1]
+    attention_probs = Dense(2 * hidden_gru_dim * X_train.shape[1], activation='softmax', name='attention_vec')(x)  # 200*2 * X_train.shape[1]
     attention_mul = Multiply()([attention_probs, x])
-    content_feedforward_1 = Dense(256, name='main_feedforward_1')(attention_mul)
-    content_feedforward_2 = Dense(128, activation='relu', name='main_feedforward_2')(content_feedforward_1)
-    content_feedforward_3 = Dense(64, activation='relu', name='main_feedforward_3')(content_feedforward_2)
-
-    # content_feedforward_linear = Dense(64, name='main_feedforward_linear')(attention_mul)
-
-    # content_feedforward_total = Multiply()([content_feedforward_3, content_feedforward_linear])
-
-    # stats part
-    stats_input = Input(shape=(65,), name='stats_input')
-    concat_layer = concatenate([content_feedforward_3, stats_input])
-    x = Dense(128, activation='relu', name='merged_feedforward_1')(concat_layer)
+    content_feedforward = Dense(256, name='main_feedforward_0')(attention_mul)
+    x = Dense(128, activation='relu', name='merged_feedforward_1')(content_feedforward)
     x = Dense(64, activation='relu', name='merged_feedforward_2')(x)
-    possibility_outputs = Dense(1, activation='sigmoid', name='label_output', kernel_regularizer=regularizers.l2(0.01))(x)  # softmax  sigmoid
-    
-    model = Model(inputs=[content_input, stats_input], outputs=[possibility_outputs])  # stats_input
+    possibility_outputs = Dense(y_train.shape[1], activation='sigmoid', kernel_regularizer=regularizers.l2(0.01))(x)  # softmax  sigmoid
+    model = Model(inputs=content_input, outputs=possibility_outputs)
     adam = Adam(lr=learning_rate, decay= adam_decay)
     model.compile(loss='binary_crossentropy', optimizer=adam, metrics=['accuracy', precision, recall, fmeasure])  # categorical_crossentropy  binary_crossentropy
     # print(model.summary())
-
-    history = model.fit([X_train_content, X_train_stats], [y_train], batch_size, epochs, validation_data=([X_val_content, X_val_stats], [y_val]), shuffle=True, callbacks=[TensorBoard(log_dir='./tmp/log')])
+        
+    # 当评价指标不在提升时，减少学习率
+    # reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001) callbacks=[reduce_lr]
+    history = model.fit(X_train, y_train, batch_size, epochs, validation_data=(X_val_content, y_val), shuffle=True, callbacks=[TensorBoard(log_dir='./tmp/log')])
 
     return model, history
 
@@ -109,14 +102,14 @@ if __name__ == '__main__':
     # 输入限制，文章数量及每篇文章输入的句子/段落数
     file_num_limit = 45614  # total 45614
     paras_limit=20
-    
+
     # params get through skopt
-    params = [[0.01, 0.1, 30, 256, 0.01],
-        [0.0038217137723146003, 0.250157103604027, 14, 116, 0.009085832277290987],
-        [0.001, 0.5, 20, 100, 0.001],
-        [0.001, 0.5, 20, 100, 0.001],
-        [0.008071101958092465, 0.3937247964684353, 17, 143, 0.009296924740317776],
-        [0.01, 0.1, 10, 256, 0.01]]
+    params = [[0.001, 0.5, 20, 100, 0.001],
+        [0.0008264084315904097, 0.4690817544521372, 19, 149, 0.002803384835865483],
+        [0.0023039721824633574, 0.5188046538445209, 29, 214, 0.0018371250753077626],
+        [0.00262970952573575, 0.5440029935851528, 19, 183, 0.007604538913808602],
+        [0.0006134489754217627, 0.1194085123353528, 25, 164, 0.002467940534494978], 
+        [0.0004896931922038582, 0.23097372734186522, 23, 226, 0.009967796624322558] ]
 
     encoded_contents, onehotlabels, stats_features = prepare_input(file_num_limit, paras_limit)
 
@@ -128,7 +121,7 @@ if __name__ == '__main__':
     # 换算成二分类
     # no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
     flaw_evaluation = []
-    for flaw_index in range(3, 4):
+    for flaw_index in range(5, 6):
         no_good_flaw_type = flaw_index # finished
         # 找出FA类的索引
         FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]
@@ -171,16 +164,16 @@ if __name__ == '__main__':
             # 采用后1000条做验证集
             # X_val, y_val = X_train[-1000:], y_train[-1000:]
             # X_train, y_train = X_train[:-1000], y_train[:-1000]
-            model, history = Bidirectional_LSTM_sematic_stats(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
+            model, history = Bidirectional_GRU_sematic(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
                                                                 X_val_content_kfold, X_val_stats_kfold, y_val_kfold, 
                                                                 learning_rate, adam_decay, dropout_rate, batch_size, epochs)
-            prediction = model.predict([X_test_content_kfold, X_test_stats_kfold])  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
+            prediction = model.predict(X_test_content_kfold)  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
             fpr, tpr, thresholds = roc_curve(y_test_kfold, prediction)
             print(type(fpr))
             roc_auc = auc(fpr, tpr)  #auc为Roc曲线下的面积
             fpr = fpr.tolist()
             tpr = tpr.tolist()
-            print('FPR, TPR: ', fpr, '\n', tpr)
+            print(str(no_good_flaw_type), '  FPR, TPR: ', fpr, '\n', tpr)
             print('auc:', roc_auc)
             _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
             print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)

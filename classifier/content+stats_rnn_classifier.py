@@ -19,7 +19,6 @@ from keras.utils import np_utils
 from keras.optimizers import Adam
 from sklearn import preprocessing
 from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import roc_curve, auc
 
 from keras.callbacks import ReduceLROnPlateau
 import matplotlib.pyplot as plt
@@ -70,15 +69,15 @@ def prepare_input(file_num_limit, paras_limit):
     return contents, onehotlabels, stats_features
 
 
-def Bidirectional_LSTM_sematic_stats(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, dropout_rate, batch_size, epochs):
+def Bidirectional_RNN_sematic_stats(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, dropout_rate, batch_size, epochs):
     # content part
-    hidden_lstm_dim = 64
+    hidden_rnn_dim = 64
     content_input = Input(shape=(X_train_content.shape[1],X_train_content.shape[2]), name='content_bert_input')
-    x = Bidirectional(LSTM(hidden_lstm_dim, return_sequences=True))(content_input)
+    x = Bidirectional(LSTM(hidden_rnn_dim, return_sequences=True))(content_input)
     x = Dropout(dropout_rate)(x)
     # 添加attention层
     x = Flatten()(x)
-    attention_probs = Dense(2 * hidden_lstm_dim * X_train_content.shape[1], activation='softmax', name='attention_vec')(x)  # 200*2 * X_train_content.shape[1]
+    attention_probs = Dense(2 * hidden_rnn_dim * X_train_content.shape[1], activation='softmax', name='attention_vec')(x)  # 200*2 * X_train_content.shape[1]
     attention_mul = Multiply()([attention_probs, x])
     content_feedforward_1 = Dense(256, name='main_feedforward_1')(attention_mul)
     content_feedforward_2 = Dense(128, activation='relu', name='main_feedforward_2')(content_feedforward_1)
@@ -111,12 +110,12 @@ if __name__ == '__main__':
     paras_limit=20
     
     # params get through skopt
-    params = [[0.01, 0.1, 30, 256, 0.01],
-        [0.0038217137723146003, 0.250157103604027, 14, 116, 0.009085832277290987],
+    params = [[0.0018053761191358488, 0.2653229208599439, 20, 106, 0.0055811066696514556],
         [0.001, 0.5, 20, 100, 0.001],
+        [0.0010874519744349558, 0.45731581812513566, 18, 213, 0.007791002647360192],
         [0.001, 0.5, 20, 100, 0.001],
-        [0.008071101958092465, 0.3937247964684353, 17, 143, 0.009296924740317776],
-        [0.01, 0.1, 10, 256, 0.01]]
+        [0.0035752749787234207, 0.5354942732779076, 11, 98, 0.0017188895182466057],
+        [0.00015132801545732777, 0.2801415909123855, 27, 97, 0.009533390973378596]]
 
     encoded_contents, onehotlabels, stats_features = prepare_input(file_num_limit, paras_limit)
 
@@ -128,7 +127,7 @@ if __name__ == '__main__':
     # 换算成二分类
     # no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
     flaw_evaluation = []
-    for flaw_index in range(3, 4):
+    for flaw_index in range(6):
         no_good_flaw_type = flaw_index # finished
         # 找出FA类的索引
         FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]
@@ -171,17 +170,10 @@ if __name__ == '__main__':
             # 采用后1000条做验证集
             # X_val, y_val = X_train[-1000:], y_train[-1000:]
             # X_train, y_train = X_train[:-1000], y_train[:-1000]
-            model, history = Bidirectional_LSTM_sematic_stats(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
+            model, history = Bidirectional_RNN_sematic_stats(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
                                                                 X_val_content_kfold, X_val_stats_kfold, y_val_kfold, 
                                                                 learning_rate, adam_decay, dropout_rate, batch_size, epochs)
             prediction = model.predict([X_test_content_kfold, X_test_stats_kfold])  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
-            fpr, tpr, thresholds = roc_curve(y_test_kfold, prediction)
-            print(type(fpr))
-            roc_auc = auc(fpr, tpr)  #auc为Roc曲线下的面积
-            fpr = fpr.tolist()
-            tpr = tpr.tolist()
-            print('FPR, TPR: ', fpr, '\n', tpr)
-            print('auc:', roc_auc)
             _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
             print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)
             kfold_precision.append(_precision)

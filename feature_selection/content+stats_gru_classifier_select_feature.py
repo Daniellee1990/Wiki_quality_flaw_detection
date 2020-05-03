@@ -1,4 +1,5 @@
 # coding='UTF-8'
+import csv
 import io
 import sys
 import os
@@ -70,15 +71,15 @@ def prepare_input(file_num_limit, paras_limit):
     return contents, onehotlabels, stats_features
 
 
-def Bidirectional_LSTM_sematic_stats(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, dropout_rate, batch_size, epochs):
+def Bidirectional_GRU_sematic_stats(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, dropout_rate, batch_size, epochs):
     # content part
-    hidden_lstm_dim = 64
+    hidden_gru_dim = 64
     content_input = Input(shape=(X_train_content.shape[1],X_train_content.shape[2]), name='content_bert_input')
-    x = Bidirectional(LSTM(hidden_lstm_dim, return_sequences=True))(content_input)
+    x = Bidirectional(GRU(hidden_gru_dim, return_sequences=True))(content_input)
     x = Dropout(dropout_rate)(x)
     # 添加attention层
     x = Flatten()(x)
-    attention_probs = Dense(2 * hidden_lstm_dim * X_train_content.shape[1], activation='softmax', name='attention_vec')(x)  # 200*2 * X_train_content.shape[1]
+    attention_probs = Dense(2 * hidden_gru_dim * X_train_content.shape[1], activation='softmax', name='attention_vec')(x)  # 200*2 * X_train_content.shape[1]
     attention_mul = Multiply()([attention_probs, x])
     content_feedforward_1 = Dense(256, name='main_feedforward_1')(attention_mul)
     content_feedforward_2 = Dense(128, activation='relu', name='main_feedforward_2')(content_feedforward_1)
@@ -89,7 +90,7 @@ def Bidirectional_LSTM_sematic_stats(X_train_content, X_train_stats, y_train, X_
     # content_feedforward_total = Multiply()([content_feedforward_3, content_feedforward_linear])
 
     # stats part
-    stats_input = Input(shape=(65,), name='stats_input')
+    stats_input = Input(shape=(X_train_stats.shape[1],), name='stats_input')
     concat_layer = concatenate([content_feedforward_3, stats_input])
     x = Dense(128, activation='relu', name='merged_feedforward_1')(concat_layer)
     x = Dense(64, activation='relu', name='merged_feedforward_2')(x)
@@ -111,12 +112,12 @@ if __name__ == '__main__':
     paras_limit=20
     
     # params get through skopt
-    params = [[0.01, 0.1, 30, 256, 0.01],
-        [0.0038217137723146003, 0.250157103604027, 14, 116, 0.009085832277290987],
+    params = [[0.004557667500673525, 0.46474188753552637, 14, 225, 0.007771022239399846],
+        [0.004576829527206503, 0.27664127235576896, 24, 229, 0.00684474968144855],
+        [0.0016436320384269347, 0.43346422137319895, 18, 220, 0.005361316304365063],
+        [0.0014289083912333465, 0.2692776633940966, 22, 117, 0.0026793135929090483],
         [0.001, 0.5, 20, 100, 0.001],
-        [0.001, 0.5, 20, 100, 0.001],
-        [0.008071101958092465, 0.3937247964684353, 17, 143, 0.009296924740317776],
-        [0.01, 0.1, 10, 256, 0.01]]
+        [0.001, 0.5, 20, 100, 0.001]]
 
     encoded_contents, onehotlabels, stats_features = prepare_input(file_num_limit, paras_limit)
 
@@ -128,7 +129,7 @@ if __name__ == '__main__':
     # 换算成二分类
     # no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
     flaw_evaluation = []
-    for flaw_index in range(3, 4):
+    for flaw_index in range(3, 5):
         no_good_flaw_type = flaw_index # finished
         # 找出FA类的索引
         FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]
@@ -157,52 +158,50 @@ if __name__ == '__main__':
         # 训练模型
         X_train_content, X_train_stats, y_train = X_contents, X_stats, y_train
 
-        # 引入十折交叉验证
-        kfold = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
-        kfold_precision, kfold_recall, kfold_f1_score, kfold_acc, kfold_TNR = [], [], [], [], []
-        fold_counter = 0
-        for train, test in kfold.split(X_train_content, y_train):
-            print('folder comes to:', fold_counter)
-            _precision, _recall, _f1_score, _acc, _TNR = 0, 0, 0, 0, 0
-            X_test_content_kfold, X_test_stats_kfold, y_test_kfold = X_train_content[test], X_train_stats[test], y_train[test]
-            X_val_content_kfold, X_val_stats_kfold, y_val_kfold = X_train_content[train[-1000:]], X_train_stats[train[-1000:]], y_train[train[-1000:]]
-            X_train_content_kfold, X_train_stats_kfold, y_train_kfold = X_train_content[train[:-1000]], X_train_stats[train[:-1000]], y_train[train[:-1000]]
+        # 在每个flaw下分别计算指标
+        for feature_index in range(35, 65):
+            X_train_stats_del_one = np.delete(X_train_stats, feature_index, axis=1)
+            # 引入十折交叉验证
+            kfold = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
+            kfold_precision, kfold_recall, kfold_f1_score, kfold_acc, kfold_TNR, kfold_training_acc, kfold_training_loss = [], [], [], [], [], [], []
+            fold_counter = 0
+            for train, test in kfold.split(X_train_content, y_train):
+                print('folder comes to:', fold_counter)
+                _precision, _recall, _f1_score, _acc, _TNR, _model_training_acc, _model_training_loss = 0, 0, 0, 0, 0, 0, 0
+                X_test_content_kfold, X_test_stats_kfold, y_test_kfold = X_train_content[test], X_train_stats_del_one[test], y_train[test]
+                X_val_content_kfold, X_val_stats_kfold, y_val_kfold = X_train_content[train[-1000:]], X_train_stats_del_one[train[-1000:]], y_train[train[-1000:]]
+                X_train_content_kfold, X_train_stats_kfold, y_train_kfold = X_train_content[train[:-1000]], X_train_stats_del_one[train[:-1000]], y_train[train[:-1000]]
 
-            # 采用后1000条做验证集
-            # X_val, y_val = X_train[-1000:], y_train[-1000:]
-            # X_train, y_train = X_train[:-1000], y_train[:-1000]
-            model, history = Bidirectional_LSTM_sematic_stats(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
-                                                                X_val_content_kfold, X_val_stats_kfold, y_val_kfold, 
-                                                                learning_rate, adam_decay, dropout_rate, batch_size, epochs)
-            prediction = model.predict([X_test_content_kfold, X_test_stats_kfold])  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
-            fpr, tpr, thresholds = roc_curve(y_test_kfold, prediction)
-            print(type(fpr))
-            roc_auc = auc(fpr, tpr)  #auc为Roc曲线下的面积
-            fpr = fpr.tolist()
-            tpr = tpr.tolist()
-            print('FPR, TPR: ', fpr, '\n', tpr)
-            print('auc:', roc_auc)
-            _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
-            print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)
-            kfold_precision.append(_precision)
-            kfold_recall.append(_recall)
-            kfold_f1_score.append(_f1_score)
-            kfold_acc.append(_acc)
-            kfold_TNR.append(_TNR)
-            fold_counter += 1
-            # Delete the Keras model with these hyper-parameters from memory.
-            del model
-    
-            # Clear the Keras session, otherwise it will keep adding new
-            # models to the same TensorFlow graph each time we create
-            # a model with a different set of hyper-parameters.
-            K.clear_session()
-            tensorflow.reset_default_graph()
-        print('10 k average evaluation is:', 'precision:', np.mean(kfold_precision), 'recall', np.mean(kfold_recall), 'f1_score', np.mean(kfold_f1_score), 'accuracy', np.mean(kfold_acc), 'TNR', np.mean(kfold_TNR))
+                # 采用后1000条做验证集
+                # X_val, y_val = X_train[-1000:], y_train[-1000:]
+                # X_train, y_train = X_train[:-1000], y_train[:-1000]
+                model, history = Bidirectional_GRU_sematic_stats(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
+                                                                    X_val_content_kfold, X_val_stats_kfold, y_val_kfold, 
+                                                                    learning_rate, adam_decay, dropout_rate, batch_size, epochs)
+                prediction = model.predict([X_test_content_kfold, X_test_stats_kfold])  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
+                _model_training_acc = history.history['acc']
+                _model_training_loss = history.history['loss']
+                _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
+                print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)
+                kfold_precision.append(_precision)
+                kfold_recall.append(_recall)
+                kfold_f1_score.append(_f1_score)
+                kfold_acc.append(_acc)
+                kfold_TNR.append(_TNR)
+                kfold_training_acc.append(_model_training_acc)
+                kfold_training_loss.append(_model_training_loss)
+                fold_counter += 1
+                # Delete the Keras model with these hyper-parameters from memory.
+                del model
+        
+                # Clear the Keras session, otherwise it will keep adding new
+                # models to the same TensorFlow graph each time we create
+                # a model with a different set of hyper-parameters.
+                K.clear_session()
+                tensorflow.reset_default_graph()
 
-        evaluation_value = str(no_good_flaw_type) + ' 10 k average evaluation is: ' + ' precision: ' + str(np.mean(kfold_precision)) + ' recall ' + str(np.mean(kfold_recall)) + ' f1_score ' + str(np.mean(kfold_f1_score)) + ' accuracy ' + str(np.mean(kfold_acc)) + ' TNR ' + str(np.mean(kfold_TNR))
-        flaw_evaluation.append(evaluation_value)
+            with open('experiment_log.csv', 'a', newline='', encoding='utf-8-sig') as t_file:
+                csv_writer = csv.writer(t_file)
+                csv_writer.writerow((str(flaw_index), 'set' + str(feature_index), np.mean(kfold_precision), np.mean(kfold_recall), np.mean(kfold_f1_score), np.mean(kfold_acc), np.mean(kfold_TNR), np.mean(kfold_training_acc, axis=0), np.mean(kfold_training_loss, axis=0)))
 
-    for item in flaw_evaluation:
-        print(item)
 

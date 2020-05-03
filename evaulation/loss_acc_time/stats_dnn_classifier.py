@@ -1,4 +1,5 @@
 # coding='UTF-8'
+import time
 import re
 import pandas as pd
 import nltk
@@ -77,7 +78,7 @@ if __name__ == '__main__':
     # 换算成二分类
     # no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
     flaw_evaluation = []
-    for flaw_index in range(5, 6):
+    for flaw_index in range(6):
         no_good_flaw_type = flaw_index # finished
         # 找出FA类的索引
         FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]
@@ -106,11 +107,12 @@ if __name__ == '__main__':
 
         # 引入十折交叉验证
         kfold = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
-        kfold_precision, kfold_recall, kfold_f1_score, kfold_acc, kfold_TNR = [], [], [], [], []
+        kfold_precision, kfold_recall, kfold_f1_score, kfold_acc, kfold_loss, kfold_time = [], [], [], [], [], []
         fold_counter = 0
         for train, test in kfold.split(X_train_stats, y_train):
             print('folder comes to:', fold_counter)
-            _precision, _recall, _f1_score, _acc, _TNR = 0, 0, 0, 0, 0
+            time_start=time.time()
+            _precision, _recall, _f1_score, _acc, _loss = 0, 0, 0, 0, 0
             X_test_stats_kfold, y_test_kfold = X_train_stats[test], y_train[test]
             X_val_stats_kfold, y_val_kfold = X_train_stats[train[-1000:]], y_train[train[-1000:]]
             X_train_stats_kfold, y_train_kfold = X_train_stats[train[:-1000]], y_train[train[:-1000]]
@@ -120,21 +122,26 @@ if __name__ == '__main__':
             # X_train, y_train = X_train[:-1000], y_train[:-1000]
             model, history = DNN_stats(X_train_stats_kfold, y_train_kfold, X_val_stats_kfold, y_val_kfold, learning_rate, adam_decay, batch_size, epochs)
             prediction = model.predict(X_test_stats_kfold)  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
-            fpr, tpr, thresholds = roc_curve(y_test_kfold, prediction)
-            print(type(fpr))
-            roc_auc = auc(fpr, tpr)  #auc为Roc曲线下的面积
-            fpr = fpr.tolist()
-            tpr = tpr.tolist()
-            print(str(no_good_flaw_type), '  FPR, TPR: ', fpr, '\n', tpr)
-            print('auc:', roc_auc)
-            _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
-            print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)
+            
+            print(history.history['loss'], history.history['acc'], history.history['val_loss'], history.history['val_acc'])
+            _precision = [history.history['precision'][0], history.history['precision'][-1], history.history['val_precision'][0], history.history['val_precision'][-1]]
+            _recall = [history.history['recall'][0], history.history['recall'][-1], history.history['val_recall'][0], history.history['val_recall'][-1]]
+            _f1_score = [history.history['fmeasure'][0], history.history['fmeasure'][-1], history.history['val_fmeasure'][0], history.history['val_fmeasure'][-1]]
+            _acc = [history.history['acc'][0], history.history['acc'][-1], history.history['val_acc'][0], history.history['val_acc'][-1]]
+            _loss = [history.history['loss'][0], history.history['loss'][-1], history.history['val_loss'][0], history.history['val_loss'][-1]]
+            # _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
+            print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'loss', _loss)
             kfold_precision.append(_precision)
             kfold_recall.append(_recall)
             kfold_f1_score.append(_f1_score)
             kfold_acc.append(_acc)
-            kfold_TNR.append(_TNR)
+            kfold_loss.append(_loss)
             fold_counter += 1
+
+            time_end=time.time()
+            _time = time_end - time_start
+            kfold_time.append(_time)
+            print('totally cost',_time)
             # Delete the Keras model with these hyper-parameters from memory.
             del model
     
@@ -143,9 +150,12 @@ if __name__ == '__main__':
             # a model with a different set of hyper-parameters.
             K.clear_session()
             tensorflow.reset_default_graph()
-        print('10 k average evaluation is:', 'precision:', np.mean(kfold_precision), 'recall', np.mean(kfold_recall), 'f1_score', np.mean(kfold_f1_score), 'accuracy', np.mean(kfold_acc), 'TNR', np.mean(kfold_TNR))
-
-        evaluation_value = str(no_good_flaw_type) + ' 10 k average evaluation is: ' + ' precision: ' + str(np.mean(kfold_precision)) + ' recall ' + str(np.mean(kfold_recall)) + ' f1_score ' + str(np.mean(kfold_f1_score)) + ' accuracy ' + str(np.mean(kfold_acc)) + ' TNR ' + str(np.mean(kfold_TNR))
+        print('10 k average evaluation is:', 'precision:', np.mean(kfold_precision, axis=0), 'recall:', np.mean(kfold_recall, axis=0), 'f1_score:', np.mean(kfold_f1_score, axis=0), 'accuracy:', np.mean(kfold_acc, axis=0), 'loss:', np.mean(kfold_loss, axis=0))
+        print('10 k average time is:', np.mean(kfold_time))
+        
+        evaluation_metrics_value = '10 k average evaluation is:' + ' precision:' + str(np.mean(kfold_precision, axis=0)) + 'recall:' + str(np.mean(kfold_recall, axis=0)) + 'f1_score:' + str(np.mean(kfold_f1_score, axis=0)) + 'accuracy:' + str(np.mean(kfold_acc, axis=0)) + 'loss:' + str(np.mean(kfold_loss, axis=0))
+        evaluation_time_value = '10 k average time is:' + str(np.mean(kfold_time))
+        evaluation_value = str(no_good_flaw_type) + ' ' + evaluation_metrics_value + '\n' + evaluation_time_value
         flaw_evaluation.append(evaluation_value)
 
     for item in flaw_evaluation:

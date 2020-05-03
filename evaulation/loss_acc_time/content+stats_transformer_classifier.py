@@ -1,4 +1,5 @@
 # coding='UTF-8'
+import time
 import io
 import sys
 import os
@@ -259,7 +260,7 @@ def binary_crossentropy_add_mi(y_true, y_pred):
     return K.mean(K.binary_crossentropy(y_true, y_pred), axis=-1) + 1e-9
 
 
-def Multi_Head_Attention_sematic(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, hidden_head, multiheads, batch_size, epochs):
+def Multi_Head_Attention_sematic_stats(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, hidden_head, multiheads, batch_size, epochs):
     # content part
     multiheads = multiheads
     head_dim = hidden_head
@@ -272,18 +273,23 @@ def Multi_Head_Attention_sematic(X_train_content, X_train_stats, y_train, X_val_
     content_feedforward_1 = Dense(256, activation='relu', name='main_feedforward_1')(x)
     content_feedforward_2 = Dense(128, activation='relu', name='main_feedforward_2')(content_feedforward_1)
     content_feedforward_3 = Dense(64, activation='relu', name='main_feedforward_3')(content_feedforward_2)
-    
-    # 
-    possibility_outputs = Dense(1, activation='sigmoid', name='label_output')(content_feedforward_3)  # softmax  sigmoid
+
+    # stats part
+    stats_input = Input(shape=(65,), name='stats_input')
+    concat_layer = concatenate([content_feedforward_3, stats_input])
+    x = Dense(128, activation='relu', name='merged_feedforward_1')(concat_layer)
+    x = Dense(64, activation='relu', name='merged_feedforward_2')(x)
+    possibility_outputs = Dense(1, activation='sigmoid', name='label_output')(x)  # softmax  sigmoid
     
     adam = optimizers.Adam(lr=learning_rate, decay=adam_decay)  # , clipnorm=0.5
-    model = Model(inputs=content_input, outputs=possibility_outputs)  # stats_input
+    model = Model(inputs=[content_input, stats_input], outputs=[possibility_outputs])  # stats_input
     model.compile(loss=binary_crossentropy_add_mi, optimizer=adam, metrics=['accuracy', precision, recall, fmeasure])  # categorical_crossentropy  binary_crossentropy
     # print(model.summary())
 
-    history = model.fit(X_train_content, y_train, batch_size, epochs, validation_data=(X_val_content, y_val), shuffle=True, callbacks=[TensorBoard(log_dir='./tmp/log')])
+    history = model.fit([X_train_content, X_train_stats], [y_train], batch_size, epochs, validation_data=([X_val_content, X_val_stats], [y_val]), shuffle=True, callbacks=[TensorBoard(log_dir='./tmp/log')])
 
     return model, history
+
 
 def draw_graph(graph_type):
     # 绘制训练 & 验证的准确率值
@@ -302,12 +308,12 @@ if __name__ == '__main__':
     paras_limit=20
 
     # params get through skopt
-    params = [[0.0001593086513635023, 50, 31, 18, 33, 0.0013014908267888882],
-        [0.0001, 32, 32, 20, 100, 1e-06],
-        [0.00027865731085418373, 49, 64, 20, 16, 0.007329958437585871],
-        [0.00019243183636601807, 22, 48, 14, 224, 0.0014532505180786372],
-        [0.00039653231480439864, 34, 55, 20, 125, 0.001714923735358048],
-        [0.0001396617345976405, 31, 46, 28, 144, 0.0012061006304266593]]
+    params = [[0.0008220285540122005, 47, 62, 21, 205, 0.009459087477038792],
+        [0.0003612832710858312, 30, 17, 21, 35, 0.0046708384009473535],
+        [0.0003006378046657311, 48, 29, 21, 81, 0.007097605957309866],
+        [0.0004701490614629333, 39, 38, 23, 210, 2.7957469250045207e-05],
+        [0.00042665320871070056, 29, 24, 19, 72, 0.006843620057362327],
+        [0.0001, 32, 32, 20, 100, 1e-06]]
 
     encoded_contents, onehotlabels, stats_features = prepare_input(file_num_limit, paras_limit)
 
@@ -351,11 +357,12 @@ if __name__ == '__main__':
 
         # 引入十折交叉验证
         kfold = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
-        kfold_precision, kfold_recall, kfold_f1_score, kfold_acc, kfold_TNR = [], [], [], [], []
+        kfold_precision, kfold_recall, kfold_f1_score, kfold_acc, kfold_loss, kfold_time = [], [], [], [], [], []
         fold_counter = 0
         for train, test in kfold.split(X_train_content, y_train):
             print('folder comes to:', fold_counter)
-            _precision, _recall, _f1_score, _acc, _TNR = 0, 0, 0, 0, 0
+            time_start=time.time()
+            _precision, _recall, _f1_score, _acc, _loss = 0, 0, 0, 0, 0
             X_test_content_kfold, X_test_stats_kfold, y_test_kfold = X_train_content[test], X_train_stats[test], y_train[test]
             X_val_content_kfold, X_val_stats_kfold, y_val_kfold = X_train_content[train[-1000:]], X_train_stats[train[-1000:]], y_train[train[-1000:]]
             X_train_content_kfold, X_train_stats_kfold, y_train_kfold = X_train_content[train[:-1000]], X_train_stats[train[:-1000]], y_train[train[:-1000]]
@@ -363,18 +370,29 @@ if __name__ == '__main__':
             # 采用后1000条做验证集
             # X_val, y_val = X_train[-1000:], y_train[-1000:]
             # X_train, y_train = X_train[:-1000], y_train[:-1000]
-            model, history = Multi_Head_Attention_sematic(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
+            model, history = Multi_Head_Attention_sematic_stats(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
                                                                 X_val_content_kfold, X_val_stats_kfold, y_val_kfold, 
                                                                 learning_rate, adam_decay, hidden_head, multiheads, batch_size, epochs)
-            prediction = model.predict(X_test_content_kfold)  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
-            _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
-            print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)
+            prediction = model.predict([X_test_content_kfold, X_test_stats_kfold])  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
+            print(history.history['loss'], history.history['acc'], history.history['val_loss'], history.history['val_acc'])
+            _precision = [history.history['precision'][0], history.history['precision'][-1], history.history['val_precision'][0], history.history['val_precision'][-1]]
+            _recall = [history.history['recall'][0], history.history['recall'][-1], history.history['val_recall'][0], history.history['val_recall'][-1]]
+            _f1_score = [history.history['fmeasure'][0], history.history['fmeasure'][-1], history.history['val_fmeasure'][0], history.history['val_fmeasure'][-1]]
+            _acc = [history.history['acc'][0], history.history['acc'][-1], history.history['val_acc'][0], history.history['val_acc'][-1]]
+            _loss = [history.history['loss'][0], history.history['loss'][-1], history.history['val_loss'][0], history.history['val_loss'][-1]]
+            # _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
+            print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'loss', _loss)
             kfold_precision.append(_precision)
             kfold_recall.append(_recall)
             kfold_f1_score.append(_f1_score)
             kfold_acc.append(_acc)
-            kfold_TNR.append(_TNR)
+            kfold_loss.append(_loss)
             fold_counter += 1
+
+            time_end=time.time()
+            _time = time_end - time_start
+            kfold_time.append(_time)
+            print('totally cost',_time)
             # Delete the Keras model with these hyper-parameters from memory.
             del model
     
@@ -383,9 +401,12 @@ if __name__ == '__main__':
             # a model with a different set of hyper-parameters.
             K.clear_session()
             tensorflow.reset_default_graph()
-        print('10 k average evaluation is:', 'precision:', np.mean(kfold_precision), 'recall', np.mean(kfold_recall), 'f1_score', np.mean(kfold_f1_score), 'accuracy', np.mean(kfold_acc), 'TNR', np.mean(kfold_TNR))
-
-        evaluation_value = str(no_good_flaw_type) + ' 10 k average evaluation is: ' + ' precision: ' + str(np.mean(kfold_precision)) + ' recall ' + str(np.mean(kfold_recall)) + ' f1_score ' + str(np.mean(kfold_f1_score)) + ' accuracy ' + str(np.mean(kfold_acc)) + ' TNR ' + str(np.mean(kfold_TNR))
+        print('10 k average evaluation is:', 'precision:', np.mean(kfold_precision, axis=0), 'recall:', np.mean(kfold_recall, axis=0), 'f1_score:', np.mean(kfold_f1_score, axis=0), 'accuracy:', np.mean(kfold_acc, axis=0), 'loss:', np.mean(kfold_loss, axis=0))
+        print('10 k average time is:', np.mean(kfold_time))
+        
+        evaluation_metrics_value = '10 k average evaluation is:' + ' precision:' + str(np.mean(kfold_precision, axis=0)) + 'recall:' + str(np.mean(kfold_recall, axis=0)) + 'f1_score:' + str(np.mean(kfold_f1_score, axis=0)) + 'accuracy:' + str(np.mean(kfold_acc, axis=0)) + 'loss:' + str(np.mean(kfold_loss, axis=0))
+        evaluation_time_value = '10 k average time is:' + str(np.mean(kfold_time))
+        evaluation_value = str(no_good_flaw_type) + ' ' + evaluation_metrics_value + '\n' + evaluation_time_value
         flaw_evaluation.append(evaluation_value)
 
     for item in flaw_evaluation:

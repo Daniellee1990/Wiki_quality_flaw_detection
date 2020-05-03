@@ -7,6 +7,7 @@ import pandas as pd
 import nltk
 import nltk.data
 import numpy as np
+import tensorflow
 import keras
 from keras import regularizers, optimizers
 from keras import backend as K
@@ -17,47 +18,12 @@ from keras.layers import Input, Dense, LSTM, Bidirectional, Flatten, Dropout, Mu
 from keras.utils import np_utils
 from sklearn import preprocessing
 from sklearn.model_selection import train_test_split, StratifiedKFold
-from keras_layer_normalization import LayerNormalization
+# from keras_layer_normalization import LayerNormalization
 
 from keras.callbacks import ReduceLROnPlateau
 import matplotlib.pyplot as plt
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer,encoding='utf-8')  #解决print输出报编码错问题
-
-
-def precision(y_true, y_pred):
-    # Calculates the precision
-    true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))  # K.clip(y_true * y_pred, 0, 1)
-    predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
-    precision = true_positives / (predicted_positives + K.epsilon())
-    return precision
-
-def recall(y_true, y_pred):
-    # Calculates the recall
-    true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
-    possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
-    recall = true_positives / (possible_positives + K.epsilon())
-    return recall
-
-def fbeta_score(y_true, y_pred, beta=1):
-    # Calculates the F score, the weighted harmonic mean of precision and recall.
-    if beta < 0:
-        raise ValueError('The lowest choosable beta is zero (only precision).')
- 
-    # If there are no true positives, fix the F score at 0 like sklearn.
-    if K.sum(K.round(K.clip(y_true, 0, 1))) == 0:
-        return 0
-
-    p = precision(y_true, y_pred)
-    r = recall(y_true, y_pred)
-    bb = beta ** 2
-    fbeta_score = (1 + bb) * (p * r) / (bb * p + r + K.epsilon())
-    return fbeta_score
-
-def fmeasure(y_true, y_pred):
-    # Calculates the f-measure, the harmonic mean of precision and recall.
-    # beta<1时,模型选对正确的标签更加重要,而beta>1时,模型对选错标签有更大的惩罚.
-    return fbeta_score(y_true, y_pred, beta=1)
+from evaluation_metrics import  precision, recall, fbeta_score, fmeasure, getAccuracy
 
 
 def prepare_input(file_num_limit, paras_limit):
@@ -293,11 +259,10 @@ def binary_crossentropy_add_mi(y_true, y_pred):
     return K.mean(K.binary_crossentropy(y_true, y_pred), axis=-1) + 1e-9
 
 
-def Multi_Head_Attention_sematic_stats(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, batch_size, epochs):
+def Multi_Head_Attention_sematic_stats(X_train_content, X_train_stats, y_train, X_val_content, X_val_stats, y_val, learning_rate, adam_decay, hidden_head, multiheads, batch_size, epochs):
     # content part
-    multiheads = 32
-    head_dim = 32
-    embedding_dim = 768
+    multiheads = multiheads
+    head_dim = hidden_head
     content_input = Input(shape=(X_train_content.shape[1],X_train_content.shape[2]), name='content_bert_input')
     embedding = Position_Embedding()(content_input)
     attention = Attention(multiheads=multiheads,head_dim=head_dim,mask_right=False)([embedding,embedding,embedding])
@@ -315,7 +280,7 @@ def Multi_Head_Attention_sematic_stats(X_train_content, X_train_stats, y_train, 
     x = Dense(64, activation='relu', name='merged_feedforward_2')(x)
     possibility_outputs = Dense(1, activation='sigmoid', name='label_output')(x)  # softmax  sigmoid
     
-    adam = optimizers.Adam(lr=0.0001, decay=1e-6)  # , clipnorm=0.5
+    adam = optimizers.Adam(lr=learning_rate, decay=adam_decay)  # , clipnorm=0.5
     model = Model(inputs=[content_input, stats_input], outputs=[possibility_outputs])  # stats_input
     model.compile(loss=binary_crossentropy_add_mi, optimizer=adam, metrics=['accuracy', precision, recall, fmeasure])  # categorical_crossentropy  binary_crossentropy
     # print(model.summary())
@@ -324,28 +289,6 @@ def Multi_Head_Attention_sematic_stats(X_train_content, X_train_stats, y_train, 
 
     return model, history
 
-
-def getAccuracy(prediction, y_test): ### prediction and y_test are both encoded.
-    sample_size = prediction.shape[0]
-    col_num = prediction.shape[1]
-    true_positive = 0
-    false_positive = 0
-    false_negative = 0
-    true_negative = 0
-    wrong_num = 0
-    for i in range(sample_size):
-        if round(prediction[i][0]) == 1 and round(y_test[i][0]) == 1:
-            true_positive = true_positive + 1
-        elif round(prediction[i][0]) == 1 and round(y_test[i][0]) == 0:
-            false_positive = false_positive + 1
-        elif round(prediction[i][0]) == 0 and round(y_test[i][0]) == 1:
-            false_negative = false_negative + 1
-        elif round(prediction[i][0]) == 0 and round(y_test[i][0]) == 0:
-            true_negative = true_negative + 1
-    precision = float(true_positive) / (float(true_positive) + float(false_positive))
-    recall = float(true_positive) / (float(true_positive) + float(false_negative))
-    f1_score = (2 * precision * recall) / (precision + recall)
-    return precision, recall, f1_score
 
 def draw_graph(graph_type):
     # 绘制训练 & 验证的准确率值
@@ -363,6 +306,14 @@ if __name__ == '__main__':
     file_num_limit = 45614  # total 45614
     paras_limit=20
 
+    # params get through skopt
+    params = [[0.0008220285540122005, 47, 62, 21, 205, 0.009459087477038792],
+        [0.0003612832710858312, 30, 17, 21, 35, 0.0046708384009473535],
+        [0.0003006378046657311, 48, 29, 21, 81, 0.007097605957309866],
+        [0.0004701490614629333, 39, 38, 23, 210, 2.7957469250045207e-05],
+        [0.00042665320871070056, 29, 24, 19, 72, 0.006843620057362327],
+        [0.0001, 32, 32, 20, 100, 1e-06]]
+
     encoded_contents, onehotlabels, stats_features = prepare_input(file_num_limit, paras_limit)
 
     # stats_features 标准化
@@ -372,52 +323,76 @@ if __name__ == '__main__':
     
     # 换算成二分类
     # no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
-    no_good_flaw_type = 0 # finished
-    # 找出FA类的索引
-    FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]
-    # 找出二分类另外一类的索引
-    not_good_indexs = [index for index in range(len(onehotlabels)) if onehotlabels[index][no_good_flaw_type] > 0]
-    binary_classification_indexs = FA_indexs + not_good_indexs
-    print('FA count:', len(FA_indexs), 'no good count:', len(not_good_indexs))
-    encoded_contents = np.array([encoded_contents[index,:,:] for index in binary_classification_indexs])
-    onehotlabels = np.array([onehotlabels[index] for index in binary_classification_indexs])
-    stats_features = np.array([stats_features[index] for index in binary_classification_indexs])
+    flaw_evaluation = []
+    for flaw_index in range(3,4):
+        no_good_flaw_type = flaw_index # finished
+        # 找出FA类的索引
+        FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]
+        # 找出二分类另外一类的索引
+        not_good_indexs = [index for index in range(len(onehotlabels)) if onehotlabels[index][no_good_flaw_type] > 0]
+        binary_classification_indexs = FA_indexs + not_good_indexs
+        print('FA count:', len(FA_indexs), 'no good count:', len(not_good_indexs))
+        X_contents = np.array([encoded_contents[index,:,:] for index in binary_classification_indexs])
+        y_train = np.array([onehotlabels[index] for index in binary_classification_indexs])
+        X_stats = np.array([stats_features[index] for index in binary_classification_indexs])
+        
+        # 变成二分类的标签
+        y_train = y_train[:,no_good_flaw_type]
+        y_train = np.array([[label] for label in y_train])
+        ### split data into training set and label set
+        # X_train, X_test, y_train, y_test = train_test_split(encoded_contents, onehotlabels, test_size=0.1, random_state=42)
+        ### params set choose
+        target_param = params[no_good_flaw_type]
+
+        learning_rate = target_param[0]
+        hidden_head = target_param[1]
+        multiheads = target_param[2]
+        epochs = target_param[3]
+        batch_size = target_param[4]
+        adam_decay = target_param[5]
+        ### create the deep learning models
+        # 训练模型
+        X_train_content, X_train_stats, y_train = X_contents, X_stats, y_train
+
+        # 引入十折交叉验证
+        kfold = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
+        kfold_precision, kfold_recall, kfold_f1_score, kfold_acc, kfold_TNR = [], [], [], [], []
+        fold_counter = 0
+        for train, test in kfold.split(X_train_content, y_train):
+            print('folder comes to:', fold_counter)
+            _precision, _recall, _f1_score, _acc, _TNR = 0, 0, 0, 0, 0
+            X_test_content_kfold, X_test_stats_kfold, y_test_kfold = X_train_content[test], X_train_stats[test], y_train[test]
+            X_val_content_kfold, X_val_stats_kfold, y_val_kfold = X_train_content[train[-1000:]], X_train_stats[train[-1000:]], y_train[train[-1000:]]
+            X_train_content_kfold, X_train_stats_kfold, y_train_kfold = X_train_content[train[:-1000]], X_train_stats[train[:-1000]], y_train[train[:-1000]]
+
+            # 采用后1000条做验证集
+            # X_val, y_val = X_train[-1000:], y_train[-1000:]
+            # X_train, y_train = X_train[:-1000], y_train[:-1000]
+            model, history = Multi_Head_Attention_sematic_stats(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
+                                                                X_val_content_kfold, X_val_stats_kfold, y_val_kfold, 
+                                                                learning_rate, adam_decay, hidden_head, multiheads, batch_size, epochs)
+            prediction = model.predict([X_test_content_kfold, X_test_stats_kfold])  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
+            _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
+            print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)
+            kfold_precision.append(_precision)
+            kfold_recall.append(_recall)
+            kfold_f1_score.append(_f1_score)
+            kfold_acc.append(_acc)
+            kfold_TNR.append(_TNR)
+            fold_counter += 1
+            # Delete the Keras model with these hyper-parameters from memory.
+            del model
     
-    # 变成二分类的标签
-    onehotlabels = onehotlabels[:,no_good_flaw_type]
-    onehotlabels = np.array([[label] for label in onehotlabels])
-    ### split data into training set and label set
-    # X_train, X_test, y_train, y_test = train_test_split(encoded_contents, onehotlabels, test_size=0.1, random_state=42)
-    ### create the deep learning models
-    epochs = 20
-    batch_size = 100
-    # 训练模型
-    X_train_content, X_train_stats, y_train = encoded_contents, stats_features, onehotlabels
+            # Clear the Keras session, otherwise it will keep adding new
+            # models to the same TensorFlow graph each time we create
+            # a model with a different set of hyper-parameters.
+            K.clear_session()
+            tensorflow.reset_default_graph()
+        print('10 k average evaluation is:', 'precision:', np.mean(kfold_precision), 'recall', np.mean(kfold_recall), 'f1_score', np.mean(kfold_f1_score), 'accuracy', np.mean(kfold_acc), 'TNR', np.mean(kfold_TNR))
 
-    # 引入十折交叉验证
-    kfold = StratifiedKFold(n_splits=10, shuffle=True, random_state=7)
-    kfold_accuracy, kfold_recall, kfold_f1_score = [], [], []
-    fold_counter = 0
-    for train, test in kfold.split(X_train_content, y_train):
-        print('folder comes to:', fold_counter)
-        X_test_content_kfold, X_test_stats_kfold, y_test_kfold = X_train_content[test], X_train_stats[test], y_train[test]
-        X_val_content_kfold, X_val_stats_kfold, y_val_kfold = X_train_content[train[-1000:]], X_train_stats[train[-1000:]], y_train[train[-1000:]]
-        X_train_content_kfold, X_train_stats_kfold, y_train_kfold = X_train_content[train[:-1000]], X_train_stats[train[:-1000]], y_train[train[:-1000]]
-        # 采用后1000条做验证集
-        # X_val, y_val = X_train[-1000:], y_train[-1000:]
-        # X_train, y_train = X_train[:-1000], y_train[:-1000]
-        model, history = Multi_Head_Attention_sematic_stats(X_train_content_kfold, X_train_stats_kfold, y_train_kfold, 
-                                                            X_val_content_kfold, X_val_stats_kfold, y_val_kfold, batch_size, epochs)
-        prediction = model.predict([X_test_content_kfold, X_test_stats_kfold])  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
-        _precision, _recall, _f1_score = getAccuracy(prediction, y_test_kfold)
-        print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score)
-        kfold_accuracy.append(_precision)
-        kfold_recall.append(_recall)
-        kfold_f1_score.append(_f1_score)
-        fold_counter += 1
-    print('10 k average evaluation is:', 'precision:', np.mean(kfold_accuracy), 'recall', np.mean(kfold_recall), 'f1_score', np.mean(kfold_f1_score))
+        evaluation_value = str(no_good_flaw_type) + ' 10 k average evaluation is: ' + ' precision: ' + str(np.mean(kfold_precision)) + ' recall ' + str(np.mean(kfold_recall)) + ' f1_score ' + str(np.mean(kfold_f1_score)) + ' accuracy ' + str(np.mean(kfold_acc)) + ' TNR ' + str(np.mean(kfold_TNR))
+        flaw_evaluation.append(evaluation_value)
 
-    # 绘制训练 & 验证的准确率值
-    # draw_graph('acc')  # loss precision recall fmeasure
-
+    for item in flaw_evaluation:
+        print(item)
 

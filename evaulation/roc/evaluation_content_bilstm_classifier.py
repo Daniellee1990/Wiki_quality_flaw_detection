@@ -147,7 +147,7 @@ if __name__ == '__main__':
     
     # 换算成二分类
     # no_footnotes-0, primary_sources-1, refimprove-2, original_research-3, advert-4, notability-5
-    no_good_flaw_type = 3 # finished
+    no_good_flaw_type = 0 # finished
     # 找出FA类的索引
     FA_indexs = [index for index in range(len(onehotlabels)) if sum([int(item) for item in onehotlabels[index]]) == 0]
     # 找出二分类另外一类的索引
@@ -161,8 +161,7 @@ if __name__ == '__main__':
     # 变成二分类的标签
     onehotlabels = onehotlabels[:,no_good_flaw_type]
     onehotlabels = np.array([[label] for label in onehotlabels])
-    ### split data into training set and label set
-    # X_train, X_test, y_train, y_test = train_test_split(encoded_contents, onehotlabels, test_size=0.1, random_state=42)
+
     ### params set choose
     target_param = params[no_good_flaw_type]
 
@@ -192,13 +191,12 @@ if __name__ == '__main__':
                                                             X_val_content_kfold, X_val_stats_kfold, y_val_kfold, 
                                                             learning_rate, adam_decay, dropout_rate, batch_size, epochs)
         prediction = model.predict(X_test_content_kfold)  # {'content_bert_input': X_test_content, 'stats_input': X_test_stats}
+        
         fpr, tpr, thresholds = roc_curve(y_test_kfold, prediction)
-        print(type(fpr))
         roc_auc = auc(fpr, tpr)  #auc为Roc曲线下的面积
-        fpr = fpr.tolist()
-        tpr = tpr.tolist()
         print('FPR, TPR: ', fpr, '\n', tpr)
         print('auc:', roc_auc)
+
         _precision, _recall, _f1_score, _acc, _TNR = getAccuracy(prediction, y_test_kfold)
         print('precision:', _precision, 'recall', _recall, 'f1_score', _f1_score, 'accuracy', _acc, 'TNR', _TNR)
         kfold_precision.append(_precision)
